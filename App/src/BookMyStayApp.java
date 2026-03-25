@@ -1,31 +1,25 @@
+import java.io.*;
 import java.util.*;
-import java.util.concurrent.*;
 
-class Reservation {
+class Reservation implements Serializable {
+    private static final long serialVersionUID = 1L;
     private String guestName;
     private String roomType;
     private String assignedRoomId;
+    private boolean isCancelled;
 
-    public Reservation(String guestName, String roomType) {
+    public Reservation(String guestName, String roomType, String assignedRoomId) {
         this.guestName = guestName;
         this.roomType = roomType;
+        this.assignedRoomId = assignedRoomId;
+        this.isCancelled = false;
     }
 
-    public String getGuestName() {
-        return guestName;
-    }
-
-    public String getRoomType() {
-        return roomType;
-    }
-
-    public void setAssignedRoomId(String roomId) {
-        this.assignedRoomId = roomId;
-    }
-
-    public String getAssignedRoomId() {
-        return assignedRoomId;
-    }
+    public String getGuestName() { return guestName; }
+    public String getRoomType() { return roomType; }
+    public String getAssignedRoomId() { return assignedRoomId; }
+    public boolean isCancelled() { return isCancelled; }
+    public void cancel() { this.isCancelled = true; }
 
     @Override
     public String toString() {
@@ -33,99 +27,103 @@ class Reservation {
                 "guestName='" + guestName + '\'' +
                 ", roomType='" + roomType + '\'' +
                 ", assignedRoomId='" + assignedRoomId + '\'' +
+                ", isCancelled=" + isCancelled +
                 '}';
     }
 }
 
-class InventoryService {
-    private final Map<String, Integer> inventory;
-    private final Map<String, Stack<String>> releasedRooms;
+class InventoryService implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private Map<String, Integer> inventory;
 
     public InventoryService() {
         inventory = new HashMap<>();
         inventory.put("Single Room", 5);
         inventory.put("Double Room", 3);
         inventory.put("Suite Room", 2);
-
-        releasedRooms = new HashMap<>();
-        releasedRooms.put("Single Room", new Stack<>());
-        releasedRooms.put("Double Room", new Stack<>());
-        releasedRooms.put("Suite Room", new Stack<>());
     }
 
-    public synchronized String allocateRoom(String roomType) {
-        int available = inventory.getOrDefault(roomType, 0);
-        if (available <= 0) return null;
-        inventory.put(roomType, available - 1);
-
-        Stack<String> stack = releasedRooms.get(roomType);
-        String roomId;
-        if (!stack.isEmpty()) {
-            roomId = stack.pop();
-        } else {
-            roomId = roomType.substring(0, 2).toUpperCase() + UUID.randomUUID().toString().substring(0, 4);
-        }
-        return roomId;
-    }
-
-    public synchronized void rollbackRoom(String roomType, String roomId) {
-        inventory.put(roomType, inventory.getOrDefault(roomType, 0) + 1);
-        releasedRooms.get(roomType).push(roomId);
-    }
-
-    public synchronized int getAvailableCount(String roomType) {
+    public int getAvailableCount(String roomType) {
         return inventory.getOrDefault(roomType, 0);
     }
-}
 
-class BookingService implements Runnable {
-    private Reservation reservation;
-    private InventoryService inventoryService;
+    public boolean allocate(String roomType) {
+        int available = inventory.getOrDefault(roomType, 0);
+        if (available <= 0) return false;
+        inventory.put(roomType, available - 1);
+        return true;
+    }
 
-    public BookingService(Reservation reservation, InventoryService inventoryService) {
-        this.reservation = reservation;
-        this.inventoryService = inventoryService;
+    public void release(String roomType) {
+        inventory.put(roomType, inventory.getOrDefault(roomType, 0) + 1);
     }
 
     @Override
-    public void run() {
-        synchronized (inventoryService) {
-            String roomId = inventoryService.allocateRoom(reservation.getRoomType());
-            if (roomId != null) {
-                reservation.setAssignedRoomId(roomId);
-                System.out.println(Thread.currentThread().getName() + " booked: " + reservation);
-            } else {
-                System.out.println(Thread.currentThread().getName() + " failed to book: " + reservation.getGuestName() + " (" + reservation.getRoomType() + ")");
-            }
+    public String toString() {
+        return "InventoryService{" + inventory + '}';
+    }
+}
+
+class PersistenceService {
+    private static final String FILE_NAME = "system_state.ser";
+
+    public static void saveState(InventoryService inventory, List<Reservation> bookings) {
+        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(FILE_NAME))) {
+            oos.writeObject(inventory);
+            oos.writeObject(bookings);
+            System.out.println("System state saved successfully.");
+        } catch (IOException e) {
+            System.out.println("Error saving state: " + e.getMessage());
+        }
+    }
+
+    public static Object[] loadState() {
+        File file = new File(FILE_NAME);
+        if (!file.exists()) {
+            System.out.println("No previous state found. Starting fresh.");
+            return null;
+        }
+
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(FILE_NAME))) {
+            InventoryService inventory = (InventoryService) ois.readObject();
+            List<Reservation> bookings = (List<Reservation>) ois.readObject();
+            System.out.println("System state restored successfully.");
+            return new Object[]{inventory, bookings};
+        } catch (IOException | ClassNotFoundException e) {
+            System.out.println("Error loading state: " + e.getMessage());
+            return null;
         }
     }
 }
 
 public class BookMyStayApp {
-    public static void main(String[] args) throws InterruptedException {
-        InventoryService inventoryService = new InventoryService();
+    public static void main(String[] args) {
+        Object[] state = PersistenceService.loadState();
+        InventoryService inventory;
+        List<Reservation> bookingHistory;
 
-        List<Reservation> reservations = Arrays.asList(
-                new Reservation("Alice", "Single Room"),
-                new Reservation("Bob", "Single Room"),
-                new Reservation("Charlie", "Single Room"),
-                new Reservation("David", "Suite Room"),
-                new Reservation("Eve", "Suite Room"),
-                new Reservation("Frank", "Suite Room")
-        );
-
-        ExecutorService executor = Executors.newFixedThreadPool(3);
-
-        for (Reservation res : reservations) {
-            executor.execute(new BookingService(res, inventoryService));
+        if (state == null) {
+            inventory = new InventoryService();
+            bookingHistory = new ArrayList<>();
+        } else {
+            inventory = (InventoryService) state[0];
+            bookingHistory = (List<Reservation>) state[1];
         }
 
-        executor.shutdown();
-        executor.awaitTermination(5, TimeUnit.SECONDS);
+        // Sample bookings
+        Reservation r1 = new Reservation("Alice", "Single Room", "SI101");
+        if (inventory.allocate(r1.getRoomType())) bookingHistory.add(r1);
 
-        System.out.println("\nFinal inventory:");
-        System.out.println("Single Room: " + inventoryService.getAvailableCount("Single Room"));
-        System.out.println("Double Room: " + inventoryService.getAvailableCount("Double Room"));
-        System.out.println("Suite Room: " + inventoryService.getAvailableCount("Suite Room"));
+        Reservation r2 = new Reservation("Bob", "Suite Room", "SU201");
+        if (inventory.allocate(r2.getRoomType())) bookingHistory.add(r2);
+
+        System.out.println("Current bookings:");
+        bookingHistory.forEach(System.out::println);
+
+        System.out.println("\nCurrent inventory:");
+        System.out.println(inventory);
+
+        // Save state
+        PersistenceService.saveState(inventory, bookingHistory);
     }
 }
