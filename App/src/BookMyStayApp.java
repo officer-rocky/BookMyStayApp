@@ -1,16 +1,14 @@
 import java.util.*;
+import java.util.concurrent.*;
 
 class Reservation {
     private String guestName;
     private String roomType;
     private String assignedRoomId;
-    private boolean isCancelled;
 
     public Reservation(String guestName, String roomType) {
         this.guestName = guestName;
         this.roomType = roomType;
-        this.assignedRoomId = null;
-        this.isCancelled = false;
     }
 
     public String getGuestName() {
@@ -21,20 +19,12 @@ class Reservation {
         return roomType;
     }
 
-    public String getAssignedRoomId() {
-        return assignedRoomId;
-    }
-
     public void setAssignedRoomId(String roomId) {
         this.assignedRoomId = roomId;
     }
 
-    public boolean isCancelled() {
-        return isCancelled;
-    }
-
-    public void cancel() {
-        this.isCancelled = true;
+    public String getAssignedRoomId() {
+        return assignedRoomId;
     }
 
     @Override
@@ -43,14 +33,13 @@ class Reservation {
                 "guestName='" + guestName + '\'' +
                 ", roomType='" + roomType + '\'' +
                 ", assignedRoomId='" + assignedRoomId + '\'' +
-                ", isCancelled=" + isCancelled +
                 '}';
     }
 }
 
 class InventoryService {
-    private Map<String, Integer> inventory;
-    private Map<String, Stack<String>> releasedRooms;
+    private final Map<String, Integer> inventory;
+    private final Map<String, Stack<String>> releasedRooms;
 
     public InventoryService() {
         inventory = new HashMap<>();
@@ -64,11 +53,7 @@ class InventoryService {
         releasedRooms.put("Suite Room", new Stack<>());
     }
 
-    public boolean isAvailable(String roomType) {
-        return inventory.getOrDefault(roomType, 0) > 0;
-    }
-
-    public String allocateRoom(String roomType) {
+    public synchronized String allocateRoom(String roomType) {
         int available = inventory.getOrDefault(roomType, 0);
         if (available <= 0) return null;
         inventory.put(roomType, available - 1);
@@ -76,72 +61,71 @@ class InventoryService {
         Stack<String> stack = releasedRooms.get(roomType);
         String roomId;
         if (!stack.isEmpty()) {
-            roomId = stack.pop(); // reuse released room
+            roomId = stack.pop();
         } else {
             roomId = roomType.substring(0, 2).toUpperCase() + UUID.randomUUID().toString().substring(0, 4);
         }
         return roomId;
     }
 
-    public void rollbackRoom(String roomType, String roomId) {
+    public synchronized void rollbackRoom(String roomType, String roomId) {
         inventory.put(roomType, inventory.getOrDefault(roomType, 0) + 1);
         releasedRooms.get(roomType).push(roomId);
     }
 
-    public int getAvailableCount(String roomType) {
+    public synchronized int getAvailableCount(String roomType) {
         return inventory.getOrDefault(roomType, 0);
     }
 }
 
-class CancellationService {
+class BookingService implements Runnable {
+    private Reservation reservation;
     private InventoryService inventoryService;
 
-    public CancellationService(InventoryService inventoryService) {
+    public BookingService(Reservation reservation, InventoryService inventoryService) {
+        this.reservation = reservation;
         this.inventoryService = inventoryService;
     }
 
-    public void cancelReservation(Reservation reservation) {
-        if (reservation.isCancelled()) {
-            System.out.println("Reservation already cancelled: " + reservation.getAssignedRoomId());
-            return;
+    @Override
+    public void run() {
+        synchronized (inventoryService) {
+            String roomId = inventoryService.allocateRoom(reservation.getRoomType());
+            if (roomId != null) {
+                reservation.setAssignedRoomId(roomId);
+                System.out.println(Thread.currentThread().getName() + " booked: " + reservation);
+            } else {
+                System.out.println(Thread.currentThread().getName() + " failed to book: " + reservation.getGuestName() + " (" + reservation.getRoomType() + ")");
+            }
         }
-
-        String roomType = reservation.getRoomType();
-        String roomId = reservation.getAssignedRoomId();
-
-        inventoryService.rollbackRoom(roomType, roomId);
-        reservation.cancel();
-        System.out.println("Reservation cancelled successfully: " + reservation);
     }
 }
 
 public class BookMyStayApp {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws InterruptedException {
         InventoryService inventoryService = new InventoryService();
-        CancellationService cancellationService = new CancellationService(inventoryService);
 
-        // Sample reservations
-        Reservation r1 = new Reservation("Alice", "Single Room");
-        r1.setAssignedRoomId(inventoryService.allocateRoom(r1.getRoomType()));
+        List<Reservation> reservations = Arrays.asList(
+                new Reservation("Alice", "Single Room"),
+                new Reservation("Bob", "Single Room"),
+                new Reservation("Charlie", "Single Room"),
+                new Reservation("David", "Suite Room"),
+                new Reservation("Eve", "Suite Room"),
+                new Reservation("Frank", "Suite Room")
+        );
 
-        Reservation r2 = new Reservation("Bob", "Suite Room");
-        r2.setAssignedRoomId(inventoryService.allocateRoom(r2.getRoomType()));
+        ExecutorService executor = Executors.newFixedThreadPool(3);
 
-        System.out.println("Initial reservations:");
-        System.out.println(r1);
-        System.out.println(r2);
+        for (Reservation res : reservations) {
+            executor.execute(new BookingService(res, inventoryService));
+        }
 
-        // Cancel one reservation
-        System.out.println("\nCancelling Alice's reservation...");
-        cancellationService.cancelReservation(r1);
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
 
-        // Attempt to cancel the same reservation again
-        System.out.println("\nAttempting to cancel Alice's reservation again...");
-        cancellationService.cancelReservation(r1);
-
-        // Check inventory after cancellation
-        System.out.println("\nCurrent inventory:");
+        System.out.println("\nFinal inventory:");
         System.out.println("Single Room: " + inventoryService.getAvailableCount("Single Room"));
+        System.out.println("Double Room: " + inventoryService.getAvailableCount("Double Room"));
         System.out.println("Suite Room: " + inventoryService.getAvailableCount("Suite Room"));
     }
 }
